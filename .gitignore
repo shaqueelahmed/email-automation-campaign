@@ -1,0 +1,20 @@
+# Secret credentials — NEVER upload these
+.env
+
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Log files (optional — remove these lines if you want logs on GitHub)
+send_log.txt
+listener_log.txt
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,20 @@
+Hi {{first_name}},
+
+Thank you so much for taking the time to reply!
+
+I appreciate your response and I'll personally follow up within 24 hours with more details tailored specifically to {{company}}.
+
+In the meantime, feel free to book a slot directly on my calendar:
+👉 {{meeting_link}}
+
+Looking forward to connecting!
+
+Best regards,
+{{sender_name}}
+{{sender_title}} | {{sender_company}}
+{{sender_phone}} | {{sender_website}}
+
+---
+Note: This is an automated acknowledgement. A personal reply is on its way.
+
+To unsubscribe from future communications, visit: {{unsubscribe_link}}
