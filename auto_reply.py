@@ -3,12 +3,13 @@ auto_reply.py — Module 3: Auto-Reply Automation
 ================================================
 • Polls IMAP inbox (replies@yourdomain.com) every 60 seconds for UNSEEN messages
 • Matches In-Reply-To / From header against ceo_data.xlsx
-• Dispatches personalised auto-reply within 5 seconds of detection
-• Injects {{first_name}}, {{company}}, {{meeting_link}} into template
+• Path A: Dispatches personalised auto-reply (Calendly link) for direct replies.
+• Path B: Detects Calendly notifications and sends a final confirmation to the CEO.
 • Logs every reply to Sheet 3 'Replies Log' in ceo_data.xlsx
 """
 
 import os
+import re
 import email
 import email.utils
 import imaplib
@@ -111,7 +112,7 @@ def send_auto_reply(to_email: str, to_name: str, original_subject: str, body: st
         msg = MIMEMultipart()
         msg["From"]    = EMAIL_USER
         msg["To"]      = to_email
-        msg["Subject"] = f"Re: {original_subject} [Auto-Reply]"
+        msg["Subject"] = f"Re: {original_subject} [Auto-Reply]" if not original_subject.startswith("Re:") else original_subject
         msg.attach(MIMEText(body, "plain", "utf-8"))
 
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
@@ -159,53 +160,113 @@ def append_replies_log(entry: dict):
         wb.save(EXCEL_FILE)
 
 def process_message(raw_bytes: bytes, imap, uid: bytes):
-    """Parse one email and dispatch auto-reply within 5 seconds."""
+    """Parse email and route to Direct Reply (Path A) or Calendly Booking (Path B)."""
     t_detect = time.time()
 
     msg         = email.message_from_bytes(raw_bytes)
     from_raw    = msg.get("From", "")
     sender_name, sender_email = email.utils.parseaddr(from_raw)
     subject     = msg.get("Subject", "(no subject)")
-    in_reply_to = msg.get("In-Reply-To", "")
+    
+    # Extract email body for Regex parsing
+    body_text = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain":
+                body_text = part.get_payload(decode=True).decode("utf-8", errors="ignore")
+                break
+    else:
+        body_text = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
 
-    log.info("New reply from %s <%s> | Subject: %s", sender_name, sender_email, subject)
+    log.info("New unseen email from %s <%s> | Subject: %s", sender_name, sender_email, subject)
+    df = load_ceo_df()
 
-    # Cross-reference against CEO data
-    df  = load_ceo_df()
+    # ── PATH B: Booking Notification from Calendly ─────────────────────────
+    if "calendly.com" in sender_email.lower():
+        log.info("   ↳ Identified as a Calendly notification.")
+        
+        # Look for the exact string from your Calendly screenshot
+        # ── THE UPGRADED REGEX FIX ───────────────────────────────────────────
+        # This handles HTML tags, line breaks, and whitespace that might be 
+        # hiding between "Invitee Email:" and the actual address.
+        
+        # Strip out all HTML tags just in case the body was parsed as HTML
+        clean_body = re.sub(r"<[^>]+>", " ", body_text)
+        
+        # Look for the email with a much more forgiving regex
+        extracted_email_match = re.search(r"Invitee Email:[\s\r\n]*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})", clean_body, re.IGNORECASE)
+        # ─────────────────────────────────────────────────────────────────────
+        
+        if not extracted_email_match:
+            log.warning("   ↳ Could not find the Invitee Email in the Calendly body. Ignoring.")
+            imap.store(uid, "+FLAGS", "\\Seen")
+            return
+            
+        booked_ceo_email = extracted_email_match.group(1).strip()
+        log.info("   ↳ Extracted booked email: %s", booked_ceo_email)
+        
+        booked_ceo = lookup_sender(booked_ceo_email, df)
+        
+        if not booked_ceo:
+             log.info("   ↳ Ignored: The person who booked (%s) is not in our CEO Master List.", booked_ceo_email)
+             imap.store(uid, "+FLAGS", "\\Seen")
+             return
+             
+        # Send Confirmation Auto-Reply
+        ceo_name = str(booked_ceo.get("Full Name", "there"))
+        confirmation_body = (
+            f"Hi {ceo_name.split()[0]},\n\n"
+            f"I just saw your meeting confirmation come through. I'm really looking forward to our chat!\n\n"
+            f"Best regards,\n"
+            f"{SENDER_NAME}"
+        )
+        
+        ok = send_auto_reply(booked_ceo_email, ceo_name, "Meeting Confirmed: Looking forward to our call", confirmation_body)
+        
+        append_replies_log({
+            "timestamp":     datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "from_email":    sender_email, # Calendly
+            "sender_name":   "Calendly Notification",
+            "ceo_name":      ceo_name,
+            "company":       str(booked_ceo.get("Company Name", "Unknown")),
+            "subject":       subject,
+            "reply_sent_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "status":        "Sent (Booking Confirmation)" if ok else "Failed",
+            "reply_preview": confirmation_body[:120].replace("\n", " ") + "…",
+        })
+        imap.store(uid, "+FLAGS", "\\Seen")
+        return
+
+    # ── PATH A: Direct Reply from a CEO ──────────────────────────────────
     ceo = lookup_sender(sender_email, df)
     
-    # ── THE GATEKEEPER FIX ────────────────────────────────────────────────
-    # If the email address is NOT in the Excel sheet, ignore it!
-    if not ceo:
-        log.info("   ↳ Ignored: %s is not in our CEO Master List.", sender_email)
-        imap.store(uid, "+FLAGS", "\\Seen") # Mark as seen so we don't check it again
+    if ceo:
+        log.info("   ↳ Identified as a direct CEO reply. Sending Calendly link.")
+        ceo_name = str(ceo.get("Full Name", sender_name))
+        company  = str(ceo.get("Company Name", "Unknown"))
+        
+        reply_body = get_auto_reply(sender_email, sender_name)
+        ok = send_auto_reply(sender_email, ceo_name, subject, reply_body)
+        
+        append_replies_log({
+            "timestamp":     datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "from_email":    sender_email,
+            "sender_name":   sender_name,
+            "ceo_name":      ceo_name,
+            "company":       company,
+            "subject":       subject,
+            "reply_sent_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "status":        "Sent (Direct Reply)" if ok else "Failed",
+            "reply_preview": reply_body[:120].replace("\n", " ") + "…",
+        })
+        
+        elapsed = time.time() - t_detect
+        log.info("   ↳ Reply dispatched in %.1f seconds.", elapsed)
+        imap.store(uid, "+FLAGS", "\\Seen")
         return
-    # ──────────────────────────────────────────────────────────────────────
 
-    ceo_name = str(ceo.get("Full Name", sender_name))
-    company  = str(ceo.get("Company Name", "Unknown"))
-
-    # Build + dispatch reply
-    body = get_auto_reply(sender_email, sender_name)
-    ok   = send_auto_reply(sender_email, ceo_name, subject, body)
-
-    elapsed = time.time() - t_detect
-    log.info("   ↳ Reply dispatched in %.1f seconds.", elapsed)
-
-    # Log to Excel
-    append_replies_log({
-        "timestamp":     datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-        "from_email":    sender_email,
-        "sender_name":   sender_name,
-        "ceo_name":      ceo_name,
-        "company":       company,
-        "subject":       subject,
-        "reply_sent_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-        "status":        "Sent" if ok else "Failed",
-        "reply_preview": body[:120].replace("\n", " ") + "…",
-    })
-
-    # Mark as Seen
+    # ── PATH C: Ignore Everything Else (Spam, YouTube, etc.) ───────────────
+    log.info("   ↳ Ignored: %s is not a CEO or Calendly notification.", sender_email)
     imap.store(uid, "+FLAGS", "\\Seen")
 
 def listen_inbox():

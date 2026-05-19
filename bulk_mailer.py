@@ -47,7 +47,7 @@ TEMPLATE_FILE      = "template.html"
 LOG_FILE           = "send_log.txt"
 
 # ── Safety controls ───────────────────────────────────────────────────────
-TEST_MODE    = True   # ← set False only when ready for live send
+TEST_MODE    = False   # ← set False only when ready for live send
 TEST_BATCH   = 1      # records to process in test mode
 DELAY_SECS   = 72     # 3600s / 50 emails = 72 s per email
 
